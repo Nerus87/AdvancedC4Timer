@@ -57,16 +57,26 @@ Versions:
 		* Added two translations, "Terrorist" and "Counter-Terrorist", generics for the above issue.
 		* Replaced KV data system with ClientPrefs to greatly improve performance.
 		
+	1.6.0 - Nerus
+		* Fix for while playing sounds after the explosion
+		* Removed warnings on a compilation
+		* Some small improvements
+		* Changed names of plugin config and translations files
+		* Removed binary and config from source
 */
 		
 #pragma semicolon 1
 
 #include <sourcemod>
 #include <sdktools>
+#include <cstrike>
 #include <clientprefs>
 
-#define PLUGIN_VERSION "1.5.0"
+#define PLUGIN_VERSION "1.6.0"
 #define TOTAL_SOUNDS 12
+
+#define ONLY_ALIVES true
+#define ONLY_HUMMANS true
 
 #define TWENTY 0
 #define ONE 1
@@ -83,16 +93,15 @@ Versions:
 
 #define SOUND_AT_TEN 1
 #define TEXT_AT_TEN 2
+#define Preferences 4
+#define Preferences_Hud 0
+#define Preferences_Chat 1
+#define Preferences_Center 2
+#define Preferences_Sound 3
 
 //* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
 
-enum Preferences
-{
-	bHud,
-	bChat,
-	bCenter,
-	bSound
-}
+bool STOP_PLAYING = false;
 
 new Handle:g_hTimer_Countdown = INVALID_HANDLE;
 new Handle:g_hEnable = INVALID_HANDLE;
@@ -140,9 +149,9 @@ public APLRes:AskPluginLoad2(Handle:myself, bool:late, String:error[], err_max)
 
 public OnPluginStart()
 {
-	LoadTranslations("plugin.advancedc4timer");
+	LoadTranslations("advancedc4timer.phrases");
 	
-	CreateConVar("sm_c4_timer_redux_version", PLUGIN_VERSION, "Advanced c4 Timer Version", FCVAR_PLUGIN|FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	CreateConVar("sm_c4_timer_redux_version", PLUGIN_VERSION, "Advanced c4 Timer Version", FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
 
 	g_hEnable = CreateConVar("sm_c4_timer_enable", "1", "Enables / Disables features of this plugin.", FCVAR_NONE, true, 0.0, true, 1.0);
 	g_bEnable = GetConVarBool(g_hEnable);
@@ -178,6 +187,7 @@ public OnPluginStart()
 	HookConVarChange(g_hCvarTimer, OnSettingsChange);
 	
 	HookEvent("bomb_planted", EventBombPlanted, EventHookMode_Pre);
+	HookEvent("player_death", EventPlayerDied, EventHookMode_PostNoCopy);
 	HookEvent("round_start", EventRoundStart, EventHookMode_PostNoCopy);
 	HookEvent("bomb_exploded", EventBombExploded, EventHookMode_PostNoCopy);
 	HookEvent("bomb_defused", EventBombDefused, EventHookMode_Post);
@@ -195,7 +205,7 @@ public OnPluginStart()
 		{
 			if(IsClientInGame(i))
 			{
-				GetClientAuthString(i, g_sSteam[i], sizeof(g_sSteam[]));
+				GetClientAuthId(i, AuthId_SteamID64, g_sSteam[i], sizeof(g_sSteam[]));
 				if(!IsFakeClient(i) && !g_bLoaded[i] && AreClientCookiesCached(i))
 					LoadClientData(i);
 			}
@@ -237,7 +247,7 @@ public OnClientPostAdminCheck(client)
 {
 	if(g_bEnable)
 	{
-		GetClientAuthString(client, g_sSteam[client], sizeof(g_sSteam[]));
+		GetClientAuthId(client, AuthId_SteamID64, g_sSteam[client], sizeof(g_sSteam[]));
 		if(!g_bLoaded[client] && AreClientCookiesCached(client))
 			LoadClientData(client);
 	}
@@ -266,23 +276,23 @@ LoadClientData(client)
 		SetClientCookie(client, g_cPrefCenter, g_sCenterDefault);
 		SetClientCookie(client, g_cPrefSound, g_sSoundDefault);
 		
-		g_Prefs[client][bHud] = StringToInt(g_sHUDDefault);
-		g_Prefs[client][bChat] = StringToInt(g_sChatDefault);
-		g_Prefs[client][bCenter] = StringToInt(g_sCenterDefault);
-		g_Prefs[client][bSound] = StringToInt(g_sSoundDefault);
+		g_Prefs[client][Preferences_Hud] = StringToInt(g_sHUDDefault);
+		g_Prefs[client][Preferences_Chat] = StringToInt(g_sChatDefault);
+		g_Prefs[client][Preferences_Center] = StringToInt(g_sCenterDefault);
+		g_Prefs[client][Preferences_Sound] = StringToInt(g_sSoundDefault);
 	}
 	else
 	{
-		g_Prefs[client][bHud] = StringToInt(sCookie);
+		g_Prefs[client][Preferences_Hud] = StringToInt(sCookie);
 		
 		GetClientCookie(client, g_cPrefChat, sCookie, sizeof(sCookie));
-		g_Prefs[client][bChat] = StringToInt(sCookie);
+		g_Prefs[client][Preferences_Chat] = StringToInt(sCookie);
 		
 		GetClientCookie(client, g_cPrefCenter, sCookie, sizeof(sCookie));
-		g_Prefs[client][bCenter] = StringToInt(sCookie);
+		g_Prefs[client][Preferences_Center] = StringToInt(sCookie);
 		
 		GetClientCookie(client, g_cPrefSound, sCookie, sizeof(sCookie));
-		g_Prefs[client][bSound] = StringToInt(sCookie);
+		g_Prefs[client][Preferences_Sound] = StringToInt(sCookie);
 	}
 	
 	g_bLoaded[client] = true;
@@ -295,8 +305,21 @@ public EventRoundStart(Handle:event, const String:name[], bool:dontBroadcast)
 {
 	if(g_bEnable)
 	{
+		STOP_PLAYING = false;
+
 		if(g_hTimer_Countdown != INVALID_HANDLE && CloseHandle(g_hTimer_Countdown))
 			g_hTimer_Countdown = INVALID_HANDLE;
+	}
+}
+
+public EventPlayerDied(Handle:event, const String:name[], bool:dontBroadcast)
+{
+	if(g_bEnable)
+	{
+		if(GetPlayersCountFromTeam(CS_TEAM_CT, ONLY_ALIVES, !ONLY_HUMMANS) == 0)
+		{
+			STOP_PLAYING = true;
+		}
 	}
 }
 
@@ -334,7 +357,7 @@ public EventBombDefused(Handle:event, const String:name[], bool:dontBroadcast)
 			GetClientName(client, sC4Defuser, sizeof(sC4Defuser));
 
 		for(new i = 1; i <= MaxClients; i++)
-			if(IsClientInGame(i) && !IsFakeClient(i) && g_Prefs[i][bHud])
+			if(IsClientInGame(i) && !IsFakeClient(i) && g_Prefs[i][Preferences_Hud])
 				PrintHintText(i, "%T", "bomb defused", i, sC4Defuser);
 	}
 }
@@ -345,10 +368,12 @@ public EventBombExploded(Handle:event, const String:name[], bool:dontBroadcast)
 	{
 		if(g_hTimer_Countdown != INVALID_HANDLE && CloseHandle(g_hTimer_Countdown))
 			g_hTimer_Countdown = INVALID_HANDLE;
+
+		STOP_PLAYING = true;
 			
 		for(new i = 1; i <= MaxClients; i++)
 		{
-			if(IsClientInGame(i) && !IsFakeClient(i) && g_Prefs[i][bHud])
+			if(IsClientInGame(i) && !IsFakeClient(i) && g_Prefs[i][Preferences_Hud])
 			{
 				PrintHintText(i, "%T", "bomb exploded", i, g_sC4Primer);
 			}
@@ -421,21 +446,21 @@ public BombMessage(count)
 				Format(sBuffer, sizeof(sBuffer), "countdown %i", count);
 				Format(sBuffer, sizeof(sBuffer), "%T", sBuffer, i, count);
 
-				if(g_Prefs[i][bSound] && !(g_iAltSound & SOUND_AT_TEN && (soundKey < 1 || soundKey > 10)))
+				if(!STOP_PLAYING && g_Prefs[i][Preferences_Sound] && !(g_iAltSound & SOUND_AT_TEN && (soundKey < 1 || soundKey > 10)))
 				{
 					EmitSoundToClient(i, g_sSoundList[soundKey]);
 				}
 				if(!(g_iAltSound & TEXT_AT_TEN && (soundKey < 1 || soundKey > 10)))
 				{
-					if(g_Prefs[i][bChat])
+					if(g_Prefs[i][Preferences_Chat])
 					{
 						PrintToChat(i, "Bomb: %s", sBuffer);
 					}
-					if(g_Prefs[i][bCenter])
+					if(g_Prefs[i][Preferences_Center])
 					{
 						PrintCenterText(i, sBuffer);
 					}
-					if(g_Prefs[i][bHud])
+					if(g_Prefs[i][Preferences_Hud])
 					{
 						PrintHintText(i, sBuffer);
 					}
@@ -460,25 +485,25 @@ public Action:SettingsMenu(client, args)
 	new Handle:menu = CreateMenu(SettingsMenuHandler);
 	Format(sBuffer, sizeof(sBuffer), "%T", "c4 menu", client);
 	SetMenuTitle(menu, sBuffer);
-	if(g_Prefs[client][bSound] == 1)
+	if(g_Prefs[client][Preferences_Sound] == 1)
 		Format(sBuffer, sizeof(sBuffer), "%T", "disable sound", client);
 	else
 		Format(sBuffer, sizeof(sBuffer), "%T", "enable sound", client);
 	AddMenuItem(menu, "menu item", sBuffer);
 
-	if(g_Prefs[client][bChat] == 1)
+	if(g_Prefs[client][Preferences_Chat] == 1)
 		Format(sBuffer, sizeof(sBuffer), "%T", "disable chat", client);
 	else
 		Format(sBuffer, sizeof(sBuffer), "%T", "enable chat", client);
 	AddMenuItem(menu, "menu item", sBuffer);
 	
-	if(g_Prefs[client][bCenter] == 1)
+	if(g_Prefs[client][Preferences_Center] == 1)
 		Format(sBuffer, sizeof(sBuffer), "%T", "disable center", client);
 	else
 		Format(sBuffer, sizeof(sBuffer), "%T", "enable center", client);
 	AddMenuItem(menu, "menu item", sBuffer);
 	
-	if(g_Prefs[client][bHud] == 1)
+	if(g_Prefs[client][Preferences_Hud] == 1)
 		Format(sBuffer, sizeof(sBuffer), "%T", "disable hud", client);
 	else
 		Format(sBuffer, sizeof(sBuffer), "%T", "enable hud", client);
@@ -499,26 +524,26 @@ public SettingsMenuHandler(Handle:menu, MenuAction:action, param1, param2)
 			{
 				case 0:
 				{
-					g_Prefs[param1][bSound] = !g_Prefs[param1][bSound];
-					IntToString(g_Prefs[param1][bSound], sBuffer, sizeof(sBuffer));
+					g_Prefs[param1][Preferences_Sound] = !g_Prefs[param1][Preferences_Sound];
+					IntToString(g_Prefs[param1][Preferences_Sound], sBuffer, sizeof(sBuffer));
 					SetClientCookie(param1, g_cPrefSound, sBuffer);
 				}
 				case 1:
 				{
-					g_Prefs[param1][bChat] = !g_Prefs[param1][bChat];
-					IntToString(g_Prefs[param1][bChat], sBuffer, sizeof(sBuffer));
+					g_Prefs[param1][Preferences_Chat] = !g_Prefs[param1][Preferences_Chat];
+					IntToString(g_Prefs[param1][Preferences_Chat], sBuffer, sizeof(sBuffer));
 					SetClientCookie(param1, g_cPrefChat, sBuffer);
 				}
 				case 2:
 				{
-					g_Prefs[param1][bCenter] = !g_Prefs[param1][bCenter];
-					IntToString(g_Prefs[param1][bCenter], sBuffer, sizeof(sBuffer));
+					g_Prefs[param1][Preferences_Center] = !g_Prefs[param1][Preferences_Center];
+					IntToString(g_Prefs[param1][Preferences_Center], sBuffer, sizeof(sBuffer));
 					SetClientCookie(param1, g_cPrefCenter, sBuffer);
 				}
 				case 3:
 				{
-					g_Prefs[param1][bHud] = !g_Prefs[param1][bHud];
-					IntToString(g_Prefs[param1][bHud], sBuffer, sizeof(sBuffer));
+					g_Prefs[param1][Preferences_Hud] = !g_Prefs[param1][Preferences_Hud];
+					IntToString(g_Prefs[param1][Preferences_Hud], sBuffer, sizeof(sBuffer));
 					SetClientCookie(param1, g_cPrefHud, sBuffer);
 				}
 			}
@@ -528,4 +553,50 @@ public SettingsMenuHandler(Handle:menu, MenuAction:action, param1, param2)
 		case MenuAction_End:
 			CloseHandle(menu);
 	}
+}
+
+public int GetPlayersCountFromTeam(int team, bool only_alives, bool only_humans)
+{
+	if(!only_alives && !only_humans)
+		return GetTeamClientCount(team);
+
+	int count = 0;
+
+	for(int client = 1; client < MaxClients+1; client++)
+	{
+		if(IsValidPlayer(client, only_humans))
+		{
+			if(GetClientTeam(client) != team || only_alives && !IsPlayerAlive(client))
+				continue;
+
+			count++;
+		}
+	}
+	
+	return count;
+}
+
+public void EmitDenaySoundToPlayer(int client)
+{
+	EmitSoundToClient(client, "buttons/button11.wav");
+}
+
+public bool IsValidPlayer(int client, bool only_human)
+{
+	if(only_human)
+	{
+		return (IsValidClient(client) && !IsClientSourceTV(client) && !IsFakeClient(client));
+	}
+	
+	return (IsValidClient(client) && !IsClientSourceTV(client));
+}
+
+public bool IsValidClient(int client)
+{
+	return (IsClient(client) && IsClientConnected(client) && IsClientInGame(client));
+}
+
+public bool IsClient(int client)
+{
+	return (client > 0 && client < MaxClients + 1);
 }
